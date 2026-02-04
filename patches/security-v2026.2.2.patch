@@ -1,0 +1,719 @@
+diff --git a/docs/gateway/security/index.md b/docs/gateway/security/index.md
+index 619450752..bc3c580d5 100644
+--- a/docs/gateway/security/index.md
++++ b/docs/gateway/security/index.md
+@@ -5,7 +5,7 @@ read_when:
+ title: "Security"
+ ---
+ 
+-# Security 🔒
++# Security
+ 
+ ## Quick check: `openclaw security audit`
+ 
+@@ -61,6 +61,26 @@ Use this when auditing access or deciding what to back up:
+ - **Model auth profiles**: `~/.openclaw/agents/<agentId>/agent/auth-profiles.json`
+ - **Legacy OAuth import**: `~/.openclaw/credentials/oauth.json`
+ 
++### Credential storage (secrets on disk)
++
++Credential files (API keys, tokens, auth profiles) are stored **in plain text** on disk. iOS uses Keychain and Android uses EncryptedSharedPreferences; desktop and CLI use JSON/files under `~/.openclaw`. Recommend **full-disk encryption (FDE)** and restricted permissions. Run `openclaw security audit --fix` and `openclaw doctor` to tighten permissions on `~/.openclaw`, config, and `credentials/**`. See [Credential storage map](#credential-storage-map) above.
++
++### Exposed instances
++
++Do **not** bind the gateway to `0.0.0.0` or a LAN address without gateway auth; untrusted networks could reach the bot. Prefer storing channel tokens in `tokenFile` or environment variables instead of inline in the config file. Use `openclaw status --all` for redacted, pasteable output when sharing debug info.
++
++### Secrets in process environment
++
++Gateway auth tokens and passwords can be supplied via config or environment variables (`OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_GATEWAY_PASSWORD`, etc.). **Secrets in environment are visible to other users on the same host** (e.g. via `ps aux` or process inspectors). For shared or multi-user hosts, prefer file-based secrets (e.g. read token from a file with restricted permissions) or a secret manager; avoid putting gateway secrets in the process environment when possible. The security audit does not enforce this; treat it as operational guidance for regulated or multi-tenant deployments.
++
++### Multi-user DM session sharing
++
++When `session.dmScope` is `"main"`, all DM senders on a channel share the same session context. That can **leak context across users** (e.g. one DM sender may see references to another). For multi-tenant or regulated use, set `session.dmScope` to `"per-channel-peer"` (or `"per-account-channel-peer"` for multi-account channels) so each DM sender gets an isolated session. `openclaw security audit` warns when DMs are open and scope is main (`channels.*.dm.scope_main_multiuser`).
++
++### Browser evaluate (act:evaluate)
++
++The browser tool can run arbitrary JavaScript in the page via `act:evaluate` (and the `wait --fn` form). This is **code execution in the browser context** and is gated by `browser.evaluateEnabled` (default: true). Only trusted, gateway-authenticated callers should trigger evaluate; the function body must never be taken from unvalidated user or API input. Set `browser.evaluateEnabled: false` to disable evaluate entirely when not needed. A length limit on the function body mitigates DoS; the trust boundary remains at the caller.
++
+ ## Security Audit Checklist
+ 
+ When the audit prints findings, treat this as a priority order:
+@@ -175,8 +195,16 @@ Plugins run **in-process** with the Gateway. Treat them as trusted code:
+   - OpenClaw uses `npm pack` and then runs `npm install --omit=dev` in that directory (npm lifecycle scripts can execute code during install).
+   - Prefer pinned, exact versions (`@scope/pkg@1.2.3`), and inspect the unpacked code on disk before enabling.
+ 
++**Plugin trust:** OpenClaw has no moderated plugin marketplace. Only install plugins from sources you trust. Use `plugins.allow` to restrict which plugin ids load. Treat `openclaw plugins install <npm-spec>` like running untrusted code (npm lifecycle scripts run at install). Prefer pinned versions and inspect unpacked code before enabling.
++
+ Details: [Plugins](/plugin)
+ 
++### Intrinsic trade-off
++
++The usefulness of the agent (autonomous actions, tools, messaging) depends on granting it access. That same access widens the attack surface. OpenClaw is suitable for technically sophisticated users who can apply sandboxing, network isolation, and strict allowlists. Defaults favor safety (loopback bind, pairing, mention gating); widening access should be deliberate. Be aware that stolen credentials or leaked API keys can be abused by third-party services; rotate secrets if you suspect compromise and avoid reusing tokens across services.
++
++OpenClaw does not implement agents that hide conversations or take legal action; any such behavior would be due to user prompts or external integrations.
++
+ ## DM access model (pairing / allowlist / open / disabled)
+ 
+ All current DM-capable channels support a DM policy (`dmPolicy` or `*.dm.policy`) that gates inbound DMs **before** the message is processed:
+@@ -302,7 +330,7 @@ Assume “compromised” means: someone got into a room that can trigger the bot
+ 
+ ## Lessons Learned (The Hard Way)
+ 
+-### The `find ~` Incident 🦞
++### The `find ~` Incident
+ 
+ On Day 1, a friendly tester asked Clawd to run `find ~` and share the output. Clawd happily dumped the entire home directory structure to a group chat.
+ 
+@@ -798,7 +826,7 @@ Strangers
+   │ No trust
+   ▼
+ Mario asking for find ~
+-  │ Definitely no trust 😏
++  │ Definitely no trust
+ ```
+ 
+ ## Reporting Security Issues
+@@ -812,5 +840,3 @@ Found a vulnerability in OpenClaw? Please report responsibly:
+ ---
+ 
+ _"Security is a process, not a product. Also, don't trust lobsters with shell access."_ — Someone wise, probably
+-
+-🦞🔐
+diff --git a/src/config/types.gateway.ts b/src/config/types.gateway.ts
+index 1bb17c9c7..1d4b7ae26 100644
+--- a/src/config/types.gateway.ts
++++ b/src/config/types.gateway.ts
+@@ -66,10 +66,6 @@ export type GatewayControlUiConfig = {
+   enabled?: boolean;
+   /** Optional base path prefix for the Control UI (e.g. "/openclaw"). */
+   basePath?: string;
+-  /** Optional filesystem root for Control UI assets (defaults to dist/control-ui). */
+-  root?: string;
+-  /** Allowed browser origins for Control UI/WebChat websocket connections. */
+-  allowedOrigins?: string[];
+   /** Allow token-only auth over insecure HTTP (default: false). */
+   allowInsecureAuth?: boolean;
+   /** DANGEROUS: Disable device identity checks for the Control UI (default: false). */
+@@ -89,6 +85,20 @@ export type GatewayAuthConfig = {
+   allowTailscale?: boolean;
+ };
+ 
++/** Phase 2 item 10: Identity-Aware Proxy (IAP). When enabled, validate X-Goog-IAP-JWT-Assertion before token/password. */
++export type GatewayIapConfig = {
++  enabled?: boolean;
++  /** Expected audience (e.g. /projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID). */
++  audience?: string;
++};
++
++/** Phase 2 item 10: Service Account OIDC. When enabled, validate Bearer token as Google OIDC before token/password. */
++export type GatewayServiceAccountConfig = {
++  enabled?: boolean;
++  /** Expected audience for the OIDC token (e.g. gateway URL or service name). */
++  audience?: string;
++};
++
+ export type GatewayTailscaleMode = "off" | "serve" | "funnel";
+ 
+ export type GatewayTailscaleConfig = {
+@@ -233,6 +243,10 @@ export type GatewayConfig = {
+   customBindHost?: string;
+   controlUi?: GatewayControlUiConfig;
+   auth?: GatewayAuthConfig;
++  /** Phase 2 item 10: IAP JWT validation (default: disabled). */
++  iap?: GatewayIapConfig;
++  /** Phase 2 item 10: Service Account OIDC validation (default: disabled). */
++  serviceAccount?: GatewayServiceAccountConfig;
+   tailscale?: GatewayTailscaleConfig;
+   remote?: GatewayRemoteConfig;
+   reload?: GatewayReloadConfig;
+@@ -245,4 +259,9 @@ export type GatewayConfig = {
+    * `x-real-ip`) to determine the client IP for local pairing and HTTP checks.
+    */
+   trustedProxies?: string[];
++  /**
++   * Allowlist of trusted WebSocket Origin values (e.g. https://control.example.com).
++   * When set and gateway is not bound to loopback, connections with Origin not in this list are rejected (CSWSH).
++   */
++  wsAllowedOrigins?: string[];
+ };
+diff --git a/src/config/zod-schema.ts b/src/config/zod-schema.ts
+index 0d1b12bee..84350a6f1 100644
+--- a/src/config/zod-schema.ts
++++ b/src/config/zod-schema.ts
+@@ -377,8 +377,6 @@ export const OpenClawSchema = z
+           .object({
+             enabled: z.boolean().optional(),
+             basePath: z.string().optional(),
+-            root: z.string().optional(),
+-            allowedOrigins: z.array(z.string()).optional(),
+             allowInsecureAuth: z.boolean().optional(),
+             dangerouslyDisableDeviceAuth: z.boolean().optional(),
+           })
+@@ -393,7 +391,40 @@ export const OpenClawSchema = z
+           })
+           .strict()
+           .optional(),
++        iap: z
++          .object({
++            enabled: z.boolean().optional(),
++            audience: z.string().optional(),
++          })
++          .strict()
++          .refine(
++            (o) =>
++              !o.enabled ||
++              (typeof o.audience === "string" && o.audience.trim().length > 0),
++            {
++              message:
++                "gateway.iap.audience is required when gateway.iap.enabled is true",
++            },
++          )
++          .optional(),
++        serviceAccount: z
++          .object({
++            enabled: z.boolean().optional(),
++            audience: z.string().optional(),
++          })
++          .strict()
++          .refine(
++            (o) =>
++              !o.enabled ||
++              (typeof o.audience === "string" && o.audience.trim().length > 0),
++            {
++              message:
++                "gateway.serviceAccount.audience is required when gateway.serviceAccount.enabled is true",
++            },
++          )
++          .optional(),
+         trustedProxies: z.array(z.string()).optional(),
++        wsAllowedOrigins: z.array(z.string()).optional(),
+         tailscale: z
+           .object({
+             mode: z.union([z.literal("off"), z.literal("serve"), z.literal("funnel")]).optional(),
+diff --git a/src/gateway/auth.test.ts b/src/gateway/auth.test.ts
+index 7910adeff..fd4f999db 100644
+--- a/src/gateway/auth.test.ts
++++ b/src/gateway/auth.test.ts
+@@ -1,7 +1,11 @@
+-import { describe, expect, it } from "vitest";
+-import { authorizeGatewayConnect } from "./auth.js";
++import { afterEach, describe, expect, it } from "vitest";
++import { authorizeGatewayConnect, validateIapServiceAccountAudience } from "./auth.js";
++import { recordAuthSuccess } from "./auth-rate-limit.js";
+ 
+ describe("gateway auth", () => {
++  afterEach(() => {
++    recordAuthSuccess("unknown");
++  });
+   it("does not throw when req is missing socket", async () => {
+     const res = await authorizeGatewayConnect({
+       auth: { mode: "token", token: "secret", allowTailscale: false },
+@@ -99,3 +103,79 @@ describe("gateway auth", () => {
+     expect(res.user).toBe("peter");
+   });
+ });
++
++describe("validateIapServiceAccountAudience", () => {
++  it("returns ok:true when gateway is undefined or has no iap/serviceAccount", () => {
++    expect(validateIapServiceAccountAudience(undefined).ok).toBe(true);
++    expect(validateIapServiceAccountAudience(null).ok).toBe(true);
++    expect(validateIapServiceAccountAudience({}).ok).toBe(true);
++  });
++
++  it("returns ok:false when iap.enabled is true without audience", () => {
++    const res = validateIapServiceAccountAudience({ iap: { enabled: true } });
++    expect(res.ok).toBe(false);
++    if (!res.ok) {
++      expect(res.message).toContain("gateway.iap.audience");
++      expect(res.message).toContain("required");
++    }
++  });
++
++  it("returns ok:false when iap.enabled is true with empty audience", () => {
++    const res = validateIapServiceAccountAudience({
++      iap: { enabled: true, audience: "   " },
++    });
++    expect(res.ok).toBe(false);
++    if (!res.ok) {
++      expect(res.message).toContain("gateway.iap.audience");
++    }
++  });
++
++  it("returns ok:true and iap when iap.enabled is true with non-empty audience", () => {
++    const res = validateIapServiceAccountAudience({
++      iap: { enabled: true, audience: "/projects/99/global/backendServices/88" },
++    });
++    expect(res.ok).toBe(true);
++    if (res.ok) {
++      expect(res.iap).toEqual({
++        enabled: true,
++        audience: "/projects/99/global/backendServices/88",
++      });
++    }
++  });
++
++  it("returns ok:false when serviceAccount.enabled is true without audience", () => {
++    const res = validateIapServiceAccountAudience({
++      serviceAccount: { enabled: true },
++    });
++    expect(res.ok).toBe(false);
++    if (!res.ok) {
++      expect(res.message).toContain("gateway.serviceAccount.audience");
++      expect(res.message).toContain("required");
++    }
++  });
++
++  it("returns ok:true and serviceAccount when serviceAccount.enabled is true with audience", () => {
++    const res = validateIapServiceAccountAudience({
++      serviceAccount: { enabled: true, audience: "https://my-service" },
++    });
++    expect(res.ok).toBe(true);
++    if (res.ok) {
++      expect(res.serviceAccount).toEqual({
++        enabled: true,
++        audience: "https://my-service",
++      });
++    }
++  });
++
++  it("returns ok:true with both when both enabled with audiences", () => {
++    const res = validateIapServiceAccountAudience({
++      iap: { enabled: true, audience: "/projects/1/global/backendServices/2" },
++      serviceAccount: { enabled: true, audience: "https://api" },
++    });
++    expect(res.ok).toBe(true);
++    if (res.ok) {
++      expect(res.iap?.audience).toBe("/projects/1/global/backendServices/2");
++      expect(res.serviceAccount?.audience).toBe("https://api");
++    }
++  });
++});
+diff --git a/src/gateway/auth.ts b/src/gateway/auth.ts
+index 294b2c94b..8736fb0b0 100644
+--- a/src/gateway/auth.ts
++++ b/src/gateway/auth.ts
+@@ -1,8 +1,69 @@
+ import type { IncomingMessage } from "node:http";
+ import { timingSafeEqual } from "node:crypto";
+-import type { GatewayAuthConfig, GatewayTailscaleMode } from "../config/config.js";
++import type {
++  GatewayAuthConfig,
++  GatewayIapConfig,
++  GatewayServiceAccountConfig,
++  GatewayTailscaleMode,
++} from "../config/config.js";
++import { createSubsystemLogger } from "../logging/subsystem.js";
+ import { readTailscaleWhoisIdentity, type TailscaleWhoisIdentity } from "../infra/tailscale.js";
++import {
++  checkAuthRateLimit,
++  recordAuthFailure,
++  recordAuthSuccess,
++} from "./auth-rate-limit.js";
+ import { isTrustedProxyAddress, parseForwardedForClientIp, resolveGatewayClientIp } from "./net.js";
++
++const logAuth = createSubsystemLogger("gateway");
++
++/** Result of validating IAP/SA audience when enabled. Used by server-runtime-config and CLI run. */
++export type ValidateIapServiceAccountResult =
++  | {
++      ok: true;
++      iap?: { enabled: true; audience: string };
++      serviceAccount?: { enabled: true; audience: string };
++    }
++  | { ok: false; message: string };
++
++const IAP_AUDIENCE_REQUIRED_MSG =
++  "gateway.iap.audience is required when gateway.iap.enabled is true (e.g. /projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID)";
++const SA_AUDIENCE_REQUIRED_MSG =
++  "gateway.serviceAccount.audience is required when gateway.serviceAccount.enabled is true (e.g. gateway URL or service name)";
++
++/**
++ * Validates IAP/SA audience when enabled. Single source of truth for server-runtime-config and CLI run.
++ */
++export function validateIapServiceAccountAudience(gateway: {
++  iap?: GatewayIapConfig;
++  serviceAccount?: GatewayServiceAccountConfig;
++} | null | undefined): ValidateIapServiceAccountResult {
++  if (!gateway) {
++    return { ok: true };
++  }
++  const iap = gateway.iap;
++  const serviceAccount = gateway.serviceAccount;
++  if (iap?.enabled) {
++    const audience = iap.audience?.trim();
++    if (!audience) {
++      return { ok: false, message: IAP_AUDIENCE_REQUIRED_MSG };
++    }
++  }
++  if (serviceAccount?.enabled) {
++    const audience = serviceAccount.audience?.trim();
++    if (!audience) {
++      return { ok: false, message: SA_AUDIENCE_REQUIRED_MSG };
++    }
++  }
++  return {
++    ok: true,
++    ...(iap?.enabled && { iap: { enabled: true as const, audience: iap.audience!.trim() } }),
++    ...(serviceAccount?.enabled && {
++      serviceAccount: { enabled: true as const, audience: serviceAccount.audience!.trim() },
++    }),
++  };
++}
++
+ export type ResolvedGatewayAuthMode = "token" | "password";
+ 
+ export type ResolvedGatewayAuth = {
+@@ -10,11 +71,15 @@ export type ResolvedGatewayAuth = {
+   token?: string;
+   password?: string;
+   allowTailscale: boolean;
++  /** Phase 2 item 10: IAP enabled and audience (from gateway.iap). */
++  iap?: { enabled: boolean; audience?: string };
++  /** Phase 2 item 10: Service Account OIDC enabled and audience (from gateway.serviceAccount). */
++  serviceAccount?: { enabled: boolean; audience?: string };
+ };
+ 
+ export type GatewayAuthResult = {
+   ok: boolean;
+-  method?: "token" | "password" | "tailscale" | "device-token";
++  method?: "token" | "password" | "tailscale" | "device-token" | "iap" | "service-account";
+   user?: string;
+   reason?: string;
+ };
+@@ -32,7 +97,8 @@ type TailscaleUser = {
+ 
+ type TailscaleWhoisLookup = (ip: string) => Promise<TailscaleWhoisIdentity | null>;
+ 
+-function safeEqual(a: string, b: string): boolean {
++/** Timing-safe string comparison for tokens/secrets. Use for auth and hooks. */
++export function safeEqual(a: string, b: string): boolean {
+   if (a.length !== b.length) {
+     return false;
+   }
+@@ -235,6 +301,10 @@ export function assertGatewayAuthConfigured(auth: ResolvedGatewayAuth): void {
+   }
+ }
+ 
++/**
++ * Authorizes gateway connection (IAP, Service Account, Tailscale, token, password, rate limit).
++ * Phase 2 item 10: IAP and Service Account validated first when enabled.
++ */
+ export async function authorizeGatewayConnect(params: {
+   auth: ResolvedGatewayAuth;
+   connectAuth?: ConnectAuth | null;
+@@ -244,14 +314,67 @@ export async function authorizeGatewayConnect(params: {
+ }): Promise<GatewayAuthResult> {
+   const { auth, connectAuth, req, trustedProxies } = params;
+   const tailscaleWhois = params.tailscaleWhois ?? readTailscaleWhoisIdentity;
++  const clientId = resolveRequestClientIp(req, trustedProxies) ?? "unknown";
++
++  const rateLimit = checkAuthRateLimit(clientId);
++  if (!rateLimit.allowed) {
++    return { ok: false, reason: "rate_limit" };
++  }
++
+   const localDirect = isLocalDirectRequest(req, trustedProxies);
+ 
++  if (auth.iap?.enabled && req) {
++    const iapToken = headerValue(req.headers["x-goog-iap-jwt-assertion"]);
++    if (iapToken) {
++      const { validateIapJwt } = await import("./auth-iap.js");
++      const identity = await validateIapJwt(iapToken, auth.iap.audience);
++      if (identity) {
++        recordAuthSuccess(clientId);
++        return { ok: true, method: "iap", user: identity.email || identity.userId };
++      }
++      recordAuthFailure(clientId);
++      logAuth.warn(
++        "IAP JWT present but validation failed; falling back to next auth method",
++        { clientId },
++      );
++    } else {
++      logAuth.debug("IAP enabled but no X-Goog-IAP-JWT-Assertion header; trying next method", {
++        clientId,
++      });
++    }
++  }
++
++  if (auth.serviceAccount?.enabled && req) {
++    const authz = headerValue(req.headers.authorization);
++    const bearer = authz?.trim().toLowerCase().startsWith("bearer ")
++      ? authz.slice(7).trim()
++      : undefined;
++    if (bearer) {
++      const { validateServiceAccountToken } = await import("./auth-iap.js");
++      const identity = await validateServiceAccountToken(bearer, auth.serviceAccount.audience);
++      if (identity) {
++        recordAuthSuccess(clientId);
++        return { ok: true, method: "service-account", user: identity.email };
++      }
++      recordAuthFailure(clientId);
++      logAuth.warn(
++        "Service account Bearer token present but validation failed; falling back to next auth method",
++        { clientId },
++      );
++    } else {
++      logAuth.debug("Service account enabled but no Bearer token; trying next method", {
++        clientId,
++      });
++    }
++  }
++
+   if (auth.allowTailscale && !localDirect) {
+     const tailscaleCheck = await resolveVerifiedTailscaleUser({
+       req,
+       tailscaleWhois,
+     });
+     if (tailscaleCheck.ok) {
++      recordAuthSuccess(clientId);
+       return {
+         ok: true,
+         method: "tailscale",
+@@ -262,30 +385,46 @@ export async function authorizeGatewayConnect(params: {
+ 
+   if (auth.mode === "token") {
+     if (!auth.token) {
++      recordAuthFailure(clientId);
++      logAuth.warn("Gateway auth failed", { clientId, reason: "token_missing_config" });
+       return { ok: false, reason: "token_missing_config" };
+     }
+     if (!connectAuth?.token) {
++      recordAuthFailure(clientId);
++      logAuth.warn("Gateway auth failed", { clientId, reason: "token_missing" });
+       return { ok: false, reason: "token_missing" };
+     }
+     if (!safeEqual(connectAuth.token, auth.token)) {
++      recordAuthFailure(clientId);
++      logAuth.warn("Gateway auth failed", { clientId, reason: "token_mismatch" });
+       return { ok: false, reason: "token_mismatch" };
+     }
++    recordAuthSuccess(clientId);
+     return { ok: true, method: "token" };
+   }
+ 
+   if (auth.mode === "password") {
+     const password = connectAuth?.password;
+     if (!auth.password) {
++      recordAuthFailure(clientId);
++      logAuth.warn("Gateway auth failed", { clientId, reason: "password_missing_config" });
+       return { ok: false, reason: "password_missing_config" };
+     }
+     if (!password) {
++      recordAuthFailure(clientId);
++      logAuth.warn("Gateway auth failed", { clientId, reason: "password_missing" });
+       return { ok: false, reason: "password_missing" };
+     }
+     if (!safeEqual(password, auth.password)) {
++      recordAuthFailure(clientId);
++      logAuth.warn("Gateway auth failed", { clientId, reason: "password_mismatch" });
+       return { ok: false, reason: "password_mismatch" };
+     }
++    recordAuthSuccess(clientId);
+     return { ok: true, method: "password" };
+   }
+ 
++  recordAuthFailure(clientId);
++  logAuth.warn("Gateway auth failed", { clientId, reason: "unauthorized" });
+   return { ok: false, reason: "unauthorized" };
+ }
+diff --git a/src/gateway/server-runtime-config.ts b/src/gateway/server-runtime-config.ts
+index 6fedc290f..3a1821c9f 100644
+--- a/src/gateway/server-runtime-config.ts
++++ b/src/gateway/server-runtime-config.ts
+@@ -8,6 +8,7 @@ import {
+   assertGatewayAuthConfigured,
+   type ResolvedGatewayAuth,
+   resolveGatewayAuth,
++  validateIapServiceAccountAudience,
+ } from "./auth.js";
+ import { normalizeControlUiBasePath } from "./control-ui-shared.js";
+ import { resolveHooksConfig } from "./hooks.js";
+@@ -20,7 +21,6 @@ export type GatewayRuntimeConfig = {
+   openResponsesEnabled: boolean;
+   openResponsesConfig?: import("../config/types.gateway.js").GatewayHttpResponsesConfig;
+   controlUiBasePath: string;
+-  controlUiRoot?: string;
+   resolvedAuth: ResolvedGatewayAuth;
+   authMode: ResolvedGatewayAuth["mode"];
+   tailscaleConfig: GatewayTailscaleConfig;
+@@ -52,11 +52,6 @@ export async function resolveGatewayRuntimeConfig(params: {
+   const openResponsesConfig = params.cfg.gateway?.http?.endpoints?.responses;
+   const openResponsesEnabled = params.openResponsesEnabled ?? openResponsesConfig?.enabled ?? false;
+   const controlUiBasePath = normalizeControlUiBasePath(params.cfg.gateway?.controlUi?.basePath);
+-  const controlUiRootRaw = params.cfg.gateway?.controlUi?.root;
+-  const controlUiRoot =
+-    typeof controlUiRootRaw === "string" && controlUiRootRaw.trim().length > 0
+-      ? controlUiRootRaw.trim()
+-      : undefined;
+   const authBase = params.cfg.gateway?.auth ?? {};
+   const authOverrides = params.auth ?? {};
+   const authConfig = {
+@@ -70,11 +65,21 @@ export async function resolveGatewayRuntimeConfig(params: {
+     ...tailscaleOverrides,
+   };
+   const tailscaleMode = tailscaleConfig.mode ?? "off";
+-  const resolvedAuth = resolveGatewayAuth({
++  let resolvedAuth = resolveGatewayAuth({
+     authConfig,
+     env: process.env,
+     tailscaleMode,
+   });
++  const iapSaResult = validateIapServiceAccountAudience(params.cfg.gateway);
++  if (!iapSaResult.ok) {
++    throw new Error(iapSaResult.message);
++  }
++  if (iapSaResult.iap) {
++    resolvedAuth = { ...resolvedAuth, iap: iapSaResult.iap };
++  }
++  if (iapSaResult.serviceAccount) {
++    resolvedAuth = { ...resolvedAuth, serviceAccount: iapSaResult.serviceAccount };
++  }
+   const authMode: ResolvedGatewayAuth["mode"] = resolvedAuth.mode;
+   const hasToken = typeof resolvedAuth.token === "string" && resolvedAuth.token.trim().length > 0;
+   const hasPassword =
+@@ -94,9 +99,10 @@ export async function resolveGatewayRuntimeConfig(params: {
+   if (tailscaleMode !== "off" && !isLoopbackHost(bindHost)) {
+     throw new Error("tailscale serve/funnel requires gateway bind=loopback (127.0.0.1)");
+   }
+-  if (!isLoopbackHost(bindHost) && !hasSharedSecret) {
++  const hasIapOrSa = resolvedAuth.iap?.enabled || resolvedAuth.serviceAccount?.enabled;
++  if (!isLoopbackHost(bindHost) && !hasSharedSecret && !hasIapOrSa) {
+     throw new Error(
+-      `refusing to bind gateway to ${bindHost}:${params.port} without auth (set gateway.auth.token/password, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD)`,
++      `refusing to bind gateway to ${bindHost}:${params.port} without auth (set gateway.auth.token/password, gateway.iap.enabled, gateway.serviceAccount.enabled, or env OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD)`,
+     );
+   }
+ 
+@@ -109,7 +115,6 @@ export async function resolveGatewayRuntimeConfig(params: {
+       ? { ...openResponsesConfig, enabled: openResponsesEnabled }
+       : undefined,
+     controlUiBasePath,
+-    controlUiRoot,
+     resolvedAuth,
+     authMode,
+     tailscaleConfig,
+diff --git a/src/gateway/server/ws-connection/message-handler.ts b/src/gateway/server/ws-connection/message-handler.ts
+index 9593ca204..7fc3e93e6 100644
+--- a/src/gateway/server/ws-connection/message-handler.ts
++++ b/src/gateway/server/ws-connection/message-handler.ts
+@@ -29,7 +29,6 @@ import { authorizeGatewayConnect, isLocalDirectRequest } from "../../auth.js";
+ import { buildDeviceAuthPayload } from "../../device-auth.js";
+ import { isLoopbackAddress, isTrustedProxyAddress, resolveGatewayClientIp } from "../../net.js";
+ import { resolveNodeCommandAllowlist } from "../../node-command-policy.js";
+-import { checkBrowserOrigin } from "../../origin-check.js";
+ import { GATEWAY_CLIENT_IDS } from "../../protocol/client-info.js";
+ import {
+   type ConnectParams,
+@@ -41,7 +40,14 @@ import {
+   validateConnectParams,
+   validateRequestFrame,
+ } from "../../protocol/index.js";
+-import { MAX_BUFFERED_BYTES, MAX_PAYLOAD_BYTES, TICK_INTERVAL_MS } from "../../server-constants.js";
++import {
++  MAX_BUFFERED_BYTES,
++  MAX_PAYLOAD_BYTES,
++  MAX_WS_MESSAGES_PER_SECOND,
++  TICK_INTERVAL_MS,
++  WS_RATE_WINDOW_MS,
++} from "../../server-constants.js";
++import { jsonReviverNoPrototypePollution } from "../../hooks.js";
+ import { handleGatewayRequest } from "../../server-methods.js";
+ import { formatError } from "../../server-utils.js";
+ import { formatForLog, logWs } from "../../ws-log.js";
+@@ -58,6 +64,12 @@ type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
+ 
+ const DEVICE_SIGNATURE_SKEW_MS = 10 * 60 * 1000;
+ 
++/** Per-connection message rate state for DoS limit. */
++const wsMessageRateBySocket = new WeakMap<
++  WebSocket,
++  { count: number; windowStart: number }
++>();
++
+ function resolveHostName(hostHeader?: string): string {
+   const host = (hostHeader ?? "").trim().toLowerCase();
+   if (!host) {
+@@ -117,6 +129,8 @@ function formatGatewayAuthFailureMessage(params: {
+       return "unauthorized: tailscale identity check failed (use Tailscale Serve auth or gateway token/password)";
+     case "tailscale_user_mismatch":
+       return "unauthorized: tailscale identity mismatch (use Tailscale Serve auth or gateway token/password)";
++    case "rate_limit":
++      return "too many failed auth attempts; try again later";
+     default:
+       break;
+   }
+@@ -235,9 +249,28 @@ export function attachGatewayWsMessageHandler(params: {
+     if (isClosed()) {
+       return;
+     }
++    const now = Date.now();
++    let state = wsMessageRateBySocket.get(socket);
++    if (!state) {
++      state = { count: 0, windowStart: now };
++      wsMessageRateBySocket.set(socket, state);
++    }
++    if (now - state.windowStart >= WS_RATE_WINDOW_MS) {
++      state.count = 0;
++      state.windowStart = now;
++    }
++    state.count += 1;
++    if (state.count > MAX_WS_MESSAGES_PER_SECOND) {
++      setCloseCause("rate-limit", { messagesInWindow: state.count });
++      logWsControl.warn(
++        `rate limit conn=${connId} remote=${remoteAddr ?? "?"} messages=${state.count}`,
++      );
++      close(1008, "Rate limit exceeded");
++      return;
++    }
+     const text = rawDataToString(data);
+     try {
+-      const parsed = JSON.parse(text);
++      const parsed = JSON.parse(text, jsonReviverNoPrototypePollution);
+       const frameType =
+         parsed && typeof parsed === "object" && "type" in parsed
+           ? typeof (parsed as { type?: unknown }).type === "string"
+@@ -366,43 +399,12 @@ export function attachGatewayWsMessageHandler(params: {
+         connectParams.role = role;
+         connectParams.scopes = scopes;
+ 
+-        const isControlUi = connectParams.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI;
+-        const isWebchat = isWebchatConnect(connectParams);
+-        if (isControlUi || isWebchat) {
+-          const originCheck = checkBrowserOrigin({
+-            requestHost,
+-            origin: requestOrigin,
+-            allowedOrigins: configSnapshot.gateway?.controlUi?.allowedOrigins,
+-          });
+-          if (!originCheck.ok) {
+-            const errorMessage =
+-              "origin not allowed (open the Control UI from the gateway host or allow it in gateway.controlUi.allowedOrigins)";
+-            setHandshakeState("failed");
+-            setCloseCause("origin-mismatch", {
+-              origin: requestOrigin ?? "n/a",
+-              host: requestHost ?? "n/a",
+-              reason: originCheck.reason,
+-              client: connectParams.client.id,
+-              clientDisplayName: connectParams.client.displayName,
+-              mode: connectParams.client.mode,
+-              version: connectParams.client.version,
+-            });
+-            send({
+-              type: "res",
+-              id: frame.id,
+-              ok: false,
+-              error: errorShape(ErrorCodes.INVALID_REQUEST, errorMessage),
+-            });
+-            close(1008, truncateCloseReason(errorMessage));
+-            return;
+-          }
+-        }
+-
+         const deviceRaw = connectParams.device;
+         let devicePublicKey: string | null = null;
+         const hasTokenAuth = Boolean(connectParams.auth?.token);
+         const hasPasswordAuth = Boolean(connectParams.auth?.password);
+         const hasSharedAuth = hasTokenAuth || hasPasswordAuth;
++        const isControlUi = connectParams.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI;
+         const allowInsecureControlUi =
+           isControlUi && configSnapshot.gateway?.controlUi?.allowInsecureAuth === true;
+         const disableControlUiDeviceAuth =

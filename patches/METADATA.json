@@ -1,0 +1,7 @@
+{
+  "baseRef": "v2026.2.2",
+  "baseSha": "95cd2210f93d6ab2acc5e29dbad6065294365863",
+  "generatedAt": "2026-02-04T07:32:47Z",
+  "securityPatch": "security-v2026.2.2.patch",
+  "geminiPatch": "gemini-v2026.2.2.patch"
+}
